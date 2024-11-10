@@ -8,7 +8,6 @@ use SlackNotify\Service\IUserMapping;
 use SlackNotify\Service\SlackNotify;
 use SlackNotify\Service\UserMapping;
 use SlackNotify\Model\SlackNotifyDAO;
-use Application\Config\IDao;
 
 $listeners = [ReviewActivity::class];
 
@@ -31,10 +30,19 @@ return [
         'aliases' => [
             ISlackNotify::SERVICE_NAME => SlackNotify::class,
             IUserMapping::SERVICE_NAME => UserMapping::class,
-            IDao::SLACK_NOTIFY_DAO => SlackNotifyDAO::class
+            'slack-notify-dao' => SlackNotifyDAO::class
         ]
     ],
     EventListenerFactory::EVENT_LISTENER_CONFIG => [
+        EventListenerFactory::TASK_COMMENT => [
+            ReviewActivity::class => [
+                [
+                    EventListenerFactory::PRIORITY => -110,
+                    EventListenerFactory::CALLBACK => 'handleReviewActivity',
+                    EventListenerFactory::MANAGER_CONTEXT => 'queue'
+                ]
+            ]
+        ],
         EventListenerFactory::TASK_REVIEW => [
             ReviewActivity::class => [
                 [
