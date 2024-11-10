@@ -1,0 +1,22 @@
+# IDE files
+.idea/
+.vscode/
+
+# Composer
+vendor/
+composer.lock
+
+# PHP
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# config
+config/module.config.php

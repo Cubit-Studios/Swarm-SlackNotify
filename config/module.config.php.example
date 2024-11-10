@@ -1,0 +1,17 @@
+<?php
+/**
+ * Example configuration for SlackNotify module
+ * Copy this file to your Swarm config directory and adjust as needed
+ */
+return [
+    'slack-notify' => [
+        // OAuth token for your Slack app (REQUIRED)
+        'token' => 'xoxb-your-token-here',
+
+        // Channel for new review notifications (REQUIRED)
+        'notify_channel' => 'swarm-reviews',
+
+        // Cache time for user mappings in seconds (OPTIONAL, defaults to 3600)
+        'user_cache_ttl' => 3600,
+    ]
+];
