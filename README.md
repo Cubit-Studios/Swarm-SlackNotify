@@ -51,6 +51,10 @@ return [
 cp /opt/perforce/swarm/module/slack-notify/config/module.config.php.example /opt/perforce/swarm/module/slack-notify/config/slack-notify.config.php
 ```
 
+4. Delete cache
+```bash
+rm -rf /opt/perforce/swarm/data/cache
+```
 ## Configuration
 
 The module requires the following configuration in your Swarm settings:
