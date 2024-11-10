@@ -24,7 +24,7 @@ A Helix Swarm module that provides enhanced Slack notifications for code reviews
 1. Clone this repository into your Swarm modules directory (typically /opt/perforce/swarm/module):
 ```bash
 cd modules
-git clone [repository-url] slack-notify
+git clone [repository-url] SlackNotify
 ```
 
 2. Add the module to your Swarm configuration (`config/custom.modules.config.php`):
