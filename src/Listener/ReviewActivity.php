@@ -54,11 +54,12 @@ class ReviewActivity extends AbstractEventListener
         ));
 
         $this->logger->debug(sprintf(
-            "%s: Event details - Review: %s, Activity Type: %s, Quiet: %s",
+            "%s: Event details - Review: %s, Activity Type: %s, Quiet: %s, Description: %s",
             self::LOG_PREFIX,
             $review ? $review->getId() : 'null',
             $activity ? $activity->get('action') : 'null',
-            $quiet ? 'true' : 'false'
+            $quiet ? 'true' : 'false',
+            $activity ? $activity->get('description') : 'null',
         ));
 
         // Detailed debugging of skip conditions

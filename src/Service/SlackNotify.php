@@ -158,31 +158,7 @@ class SlackNotify implements ISlackNotify, InvokableService
             $lock->lock();
 
             // Try to get comment text directly
-            $commentText = $activity->get('body');
-            if (!$commentText) {
-                // If not found directly, try to get from current
-                $current = $activity->get('current');
-                if (is_array($current)) {
-                    $commentText = $current['body'] ?? null;
-                }
-
-                // If still not found, try getRawValue
-                if (!$commentText) {
-                    $commentText = $activity->getRawValue('body');
-                }
-
-                // Final fallback
-                if (!$commentText) {
-                    $commentText = 'No comment text';
-                }
-
-                $this->logger->debug(sprintf(
-                    "%s: Got comment text: %s",
-                    self::LOG_PREFIX,
-                    $commentText
-                ));
-            }
-
+            $commentText = $activity->get('description');
             $reviewAuthor = $review->getAuthorObject();
             $this->logger->debug(sprintf(
                 "%s: Review owner: %s",
