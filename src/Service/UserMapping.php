@@ -9,6 +9,7 @@ use Laminas\Http\Client;
 use Laminas\Http\Request;
 use Exception;
 use Interop\Container\ContainerInterface;
+use Users\Model\User;
 
 class UserMapping implements IUserMapping, InvokableService
 {
@@ -24,8 +25,10 @@ class UserMapping implements IUserMapping, InvokableService
         $this->logger = $services->get(SwarmLogger::SERVICE);
     }
 
-    public function getSlackUserId(string $email): ?string
+    public function getSlackUserId(User $user): ?string
     {
+        $email = $user->getEmail();
+
         // Check cache first
         if (isset($this->cache[$email])) {
             list($userId, $timestamp) = $this->cache[$email];

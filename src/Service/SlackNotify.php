@@ -2,8 +2,10 @@
 namespace SlackNotify\Service;
 
 use Activity\Model\Activity;
+use Activity\Model\IActivity;
 use Application\Config\ConfigManager;
 use Application\Config\IConfigDefinition as IDef;
+use Application\Config\IDao;
 use Application\Connection\ConnectionFactory;
 use Application\Factory\InvokableService;
 use Application\Log\SwarmLogger;
@@ -11,9 +13,9 @@ use Laminas\Http\Client;
 use Laminas\Http\Request;
 use Reviews\Model\Review;
 use Record\Lock\Lock;
-use Record\Key\AbstractKey;
 use Exception;
 use Interop\Container\ContainerInterface;
+use Users\Model\User;
 
 class SlackNotify implements ISlackNotify, InvokableService
 {
@@ -31,6 +33,12 @@ class SlackNotify implements ISlackNotify, InvokableService
 
     public function notifyNewReview(Review $review)
     {
+        $this->logger->debug(sprintf(
+            "%s: Starting notifyNewReview for review #%s",
+            self::LOG_PREFIX,
+            $review->getId()
+        ));
+
         $config = $this->services->get(IDef::CONFIG);
         $channel = ConfigManager::getValue($config, 'slack-notify.notify_channel');
         $p4Admin = $this->services->get(ConnectionFactory::P4_ADMIN);
@@ -41,9 +49,28 @@ class SlackNotify implements ISlackNotify, InvokableService
         try {
             $lock->lock();
 
-            $reviewers = $review->getReviewers();
-            $author = $review->getAuthor();
-            $description = $review->getDescription();
+            $reviewData = $review->getDescription();
+            $this->logger->debug(sprintf(
+                "%s: Review data: %s",
+                self::LOG_PREFIX,
+                json_encode($reviewData)
+            ));
+
+            $user = $review->getAuthorObject();
+            $this->logger->debug(sprintf(
+                "%s: Review user: %s",
+                self::LOG_PREFIX,
+                $user->getFullName()
+            ));
+
+            $description = $review->getDescription() ?? 'No description';
+            $reviewers = $review->getReviewers() ?? [];
+
+            $this->logger->debug(sprintf(
+                "%s: Found reviewers: %s",
+                self::LOG_PREFIX,
+                implode(', ', $reviewers)
+            ));
 
             $message = [
                 'channel' => $channel,
@@ -60,14 +87,14 @@ class SlackNotify implements ISlackNotify, InvokableService
                         'type' => 'section',
                         'text' => [
                             'type' => 'mrkdwn',
-                            'text' => "*Author:* {$author}\n*Description:* {$description}"
+                            'text' => "*User:* {$user->getFullName()}\n*Description:* {$description}"
                         ]
                     ],
                     [
                         'type' => 'section',
                         'text' => [
                             'type' => 'mrkdwn',
-                            'text' => "*Reviewers:* " . implode(', ', array_keys($reviewers))
+                            'text' => "*Reviewers:* " . implode(', ', $reviewers)
                         ]
                     ],
                     [
@@ -79,6 +106,12 @@ class SlackNotify implements ISlackNotify, InvokableService
                     ]
                 ]
             ];
+
+            $this->logger->debug(sprintf(
+                "%s: Sending Slack message for new review: %s",
+                self::LOG_PREFIX,
+                json_encode($message)
+            ));
 
             $this->postToSlack($message);
 
@@ -95,64 +128,177 @@ class SlackNotify implements ISlackNotify, InvokableService
 
     public function notifyNewComment(Review $review, Activity $activity)
     {
+        $this->logger->debug(sprintf(
+            "%s: Starting notifyNewComment for review #%s",
+            self::LOG_PREFIX,
+            $review->getId()
+        ));
+
+        $commentAuthorId = $activity->getRawValue(IActivity::USER);
+        $commentAction = $activity->getRawValue(IActivity::ACTION);
+
+        // Log the activity values using proper methods
+        $this->logger->debug(sprintf(
+            "%s: Activity values - Author: %s, Action: %s",
+            self::LOG_PREFIX,
+            $commentAuthorId,
+            $commentAction
+        ));
+
         $config = $this->services->get(IDef::CONFIG);
         $channel = ConfigManager::getValue($config, 'slack-notify.notify_channel');
-        $p4Admin = $this->services->get(ConnectionFactory::P4_ADMIN);
+        $p4      = $this->services->get(ConnectionFactory::P4_ADMIN);
+        $userDao = $this->services->get(IDao::USER_DAO);
+
 
         // Create lock to prevent duplicate notifications
-        $lock = new Lock('slacknotify-comment-' . $activity->getId(), $p4Admin);
+        $lock = new Lock('slacknotify-comment-' . $activity->getId(), $p4);
 
         try {
             $lock->lock();
 
-            $commentAuthor = $activity->get(IActivity::USER);
+            // Try to get comment text directly
             $commentText = $activity->get('body');
-            $reviewAuthor = $review->getAuthor();
-
-            // Notify reviewers
-            foreach ($review->getReviewers() as $reviewer => $status) {
-                // Skip if reviewer is the comment author
-                if ($reviewer === $commentAuthor) {
-                    continue;
+            if (!$commentText) {
+                // If not found directly, try to get from current
+                $current = $activity->get('current');
+                if (is_array($current)) {
+                    $commentText = $current['body'] ?? null;
                 }
 
-                $slackUserId = $this->userMapping->getSlackUserId($reviewer);
-                if ($slackUserId) {
-                    $message = $this->buildCommentMessage(
-                        $slackUserId,
-                        $review,
-                        $commentAuthor,
-                        $commentText
-                    );
-                    $this->postToSlack($message);
-                } else {
-                    // Log failure to find user
-                    $this->notifyUserLookupFailure($channel, $reviewer);
+                // If still not found, try getRawValue
+                if (!$commentText) {
+                    $commentText = $activity->getRawValue('body');
+                }
+
+                // Final fallback
+                if (!$commentText) {
+                    $commentText = 'No comment text';
+                }
+
+                $this->logger->debug(sprintf(
+                    "%s: Got comment text: %s",
+                    self::LOG_PREFIX,
+                    $commentText
+                ));
+            }
+
+            $reviewAuthor = $review->getAuthorObject();
+            $this->logger->debug(sprintf(
+                "%s: Review owner: %s",
+                self::LOG_PREFIX,
+                $reviewAuthor->getFullName()
+            ));
+
+            // Notify reviewers
+            $reviewers = $review->getReviewers();
+            if (!empty($reviewers)) {
+                foreach ($reviewers as $reviewerId) {
+                    // Skip if the reviewer is also the comment author
+                    if ($reviewerId === $commentAuthorId) {
+                        $this->logger->debug(sprintf(
+                            "%s: Skipping notification to reviewer %s (comment author)",
+                            self::LOG_PREFIX,
+                            $reviewerId
+                        ));
+                        continue;
+                    }
+
+                    if (!$userDao->exists($reviewerId, $p4)) {
+                        $this->logger->debug(sprintf(
+                            "%s: User with id does not exist: %s",
+                            self::LOG_PREFIX,
+                            $reviewerId
+                        ));
+                        continue;
+                    }
+
+                    // Retrieve user
+                    /** @var User $reviewer */
+                    $reviewer = $userDao->fetchById($reviewerId, $p4);
+                    $this->logger->debug(sprintf(
+                        "%s: Processing reviewer: %s",
+                        self::LOG_PREFIX,
+                        $reviewerId
+                    ));
+
+                    // Retrieve Slack user ID
+                    $slackUserId = $this->userMapping->getSlackUserId($reviewer);
+                    if ($slackUserId) {
+                        $this->logger->debug(sprintf(
+                            "%s: Found Slack user ID for reviewer %s: %s",
+                            self::LOG_PREFIX,
+                            $reviewerId,
+                            $slackUserId
+                        ));
+
+                        // Build and post the Slack message
+                        $message = $this->buildCommentMessage(
+                            $slackUserId,
+                            $review,
+                            $commentAuthorId,
+                            $commentText
+                        );
+                        $this->postToSlack($message);
+                    } else {
+                        // Log and handle missing Slack ID
+                        $this->logger->debug(sprintf(
+                            "%s: No Slack user ID found for reviewer %s",
+                            self::LOG_PREFIX,
+                            $reviewerId
+                        ));
+                        $this->notifyUserLookupFailure($channel, $reviewerId);
+                    }
                 }
             }
 
-            // Notify review author if they didn't make the comment
-            if ($reviewAuthor !== $commentAuthor) {
-                $authorSlackId = $this->userMapping->getSlackUserId($reviewAuthor);
-                if ($authorSlackId) {
+            // Notify review owner if they didn't make the comment
+            if ($reviewAuthor->getId() !== $commentAuthorId) {
+                $this->logger->debug(sprintf(
+                    "%s: Attempting to notify review owner %s",
+                    self::LOG_PREFIX,
+                    $reviewAuthor->getId()
+                ));
+
+                $ownerSlackId = $this->userMapping->getSlackUserId($reviewAuthor);
+                if ($ownerSlackId) {
+                    $this->logger->debug(sprintf(
+                        "%s: Found Slack user ID for review owner %s (email: %s): %s",
+                        self::LOG_PREFIX,
+                        $reviewAuthor->getFullName(),
+                        $reviewAuthor->getEmail(),
+                        $ownerSlackId
+                    ));
+
                     $message = $this->buildCommentMessage(
-                        $authorSlackId,
+                        $ownerSlackId,
                         $review,
-                        $commentAuthor,
+                        $commentAuthorId,
                         $commentText
                     );
                     $this->postToSlack($message);
                 } else {
-                    // Log failure to find user
-                    $this->notifyUserLookupFailure($channel, $reviewAuthor);
+                    $this->logger->debug(sprintf(
+                        "%s: No Slack user ID found for review owner %s",
+                        self::LOG_PREFIX,
+                        $reviewAuthor->getFullName()
+                    ));
+                    $this->notifyUserLookupFailure($channel, $reviewAuthor->getId());
                 }
+            } else {
+                $this->logger->debug(sprintf(
+                    "%s: Skipping notification to review owner %s (comment author)",
+                    self::LOG_PREFIX,
+                    $reviewAuthor->getFullName()
+                ));
             }
 
         } catch (Exception $e) {
             $this->logger->err(sprintf(
-                "%s: Failed to send comment notifications: %s",
+                "%s: Failed to send comment notifications: %s\nStack trace: %s",
                 self::LOG_PREFIX,
-                $e->getMessage()
+                $e->getMessage(),
+                $e->getTraceAsString()
             ));
         } finally {
             $lock->unlock();
@@ -162,10 +308,10 @@ class SlackNotify implements ISlackNotify, InvokableService
     private function buildCommentMessage(
         string $slackUserId,
         Review $review,
-        string $commentAuthor,
+        string $commentAuthorId,
         string $commentText
     ): array {
-        return [
+        $message = [
             'channel' => $slackUserId,
             'text' => "New comment on review #{$review->getId()}",
             'blocks' => [
@@ -180,7 +326,7 @@ class SlackNotify implements ISlackNotify, InvokableService
                     'type' => 'section',
                     'text' => [
                         'type' => 'mrkdwn',
-                        'text' => "*From:* {$commentAuthor}\n*Comment:* {$commentText}"
+                        'text' => "*From:* {$commentAuthorId}\n*Comment:* {$commentText}"
                     ]
                 ],
                 [
@@ -192,23 +338,37 @@ class SlackNotify implements ISlackNotify, InvokableService
                 ]
             ]
         ];
+
+        $this->logger->debug(sprintf(
+            "%s: Built comment message: %s",
+            self::LOG_PREFIX,
+            json_encode($message)
+        ));
+
+        return $message;
     }
 
-    private function notifyUserLookupFailure(string $channel, string $user)
+    private function notifyUserLookupFailure(string $channel, string $userId)
     {
         $message = [
             'channel' => $channel,
-            'text' => "Failed to find Slack user for Swarm user: {$user}",
+            'text' => "Failed to find Slack user for Swarm user: {$userId}",
             'blocks' => [
                 [
                     'type' => 'section',
                     'text' => [
                         'type' => 'mrkdwn',
-                        'text' => "⚠️ Failed to find Slack user for Swarm user: {$user}"
+                        'text' => "⚠️ Failed to find Slack user for Swarm user: {$userId}"
                     ]
                 ]
             ]
         ];
+
+        $this->logger->debug(sprintf(
+            "%s: Sending user lookup failure notification for user %s",
+            self::LOG_PREFIX,
+            $userId
+        ));
 
         $this->postToSlack($message);
     }
@@ -221,12 +381,25 @@ class SlackNotify implements ISlackNotify, InvokableService
 
         $baseUrl = $externalURL ?? "http://" . $hostname;
         $serverPath = P4_SERVER_ID ? P4_SERVER_ID . "/" : '';
+        $url = $baseUrl . "/" . $serverPath . "reviews/" . $review->getId();
 
-        return $baseUrl . "/" . $serverPath . "reviews/" . $review->getId();
+        $this->logger->debug(sprintf(
+            "%s: Generated review URL: %s",
+            self::LOG_PREFIX,
+            $url
+        ));
+
+        return $url;
     }
 
     private function postToSlack(array $message)
     {
+        $this->logger->debug(sprintf(
+            "%s: Attempting to post message to Slack: %s",
+            self::LOG_PREFIX,
+            json_encode($message)
+        ));
+
         $config = $this->services->get(IDef::CONFIG);
         $token = ConfigManager::getValue($config, 'slack-notify.token');
 
@@ -242,6 +415,12 @@ class SlackNotify implements ISlackNotify, InvokableService
         $response = $client->send();
 
         if (!$response->isSuccess()) {
+            $this->logger->err(sprintf(
+                "%s: HTTP error posting to Slack: %s %s",
+                self::LOG_PREFIX,
+                $response->getStatusCode(),
+                $response->getReasonPhrase()
+            ));
             throw new Exception(
                 "Failed to post to Slack: " . $response->getStatusCode() . " " . $response->getReasonPhrase()
             );
@@ -249,7 +428,17 @@ class SlackNotify implements ISlackNotify, InvokableService
 
         $result = json_decode($response->getBody(), true);
         if (!$result['ok']) {
+            $this->logger->err(sprintf(
+                "%s: Slack API error: %s",
+                self::LOG_PREFIX,
+                $result['error'] ?? 'Unknown error'
+            ));
             throw new Exception("Slack API error: " . ($result['error'] ?? 'Unknown error'));
         }
+
+        $this->logger->debug(sprintf(
+            "%s: Successfully posted message to Slack",
+            self::LOG_PREFIX
+        ));
     }
 }

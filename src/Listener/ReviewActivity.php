@@ -16,23 +16,12 @@ class ReviewActivity extends AbstractEventListener
     const LOG_PREFIX = ReviewActivity::class;
     protected $slackNotify = null;
 
-    /**
-     * Construct with required services
-     * @param ServiceLocator  $services    the service locator to use
-     * @param array          $eventConfig  the event config for this listener
-     */
     public function __construct(ServiceLocator $services, array $eventConfig)
     {
         parent::__construct($services, $eventConfig);
         $this->slackNotify = $this->services->get(ISlackNotify::SERVICE_NAME);
     }
 
-    /**
-     * Attaches this event only if the slack token has been provided
-     * @param mixed $eventName    the event name
-     * @param array $eventDetail  the event detail
-     * @return bool true if the slack token is set
-     */
     public function shouldAttach($eventName, $eventDetail): bool
     {
         $config = $this->services->get(IDef::CONFIG);
@@ -50,10 +39,6 @@ class ReviewActivity extends AbstractEventListener
         return true;
     }
 
-    /**
-     * Handle review activity events
-     * @param Event $event the event
-     */
     public function handleReviewActivity(Event $event)
     {
         $review = $event->getParam('review');
@@ -61,37 +46,90 @@ class ReviewActivity extends AbstractEventListener
         $quiet = $event->getParam('quiet');
         $data = (array) $event->getParam('data') + ['quiet' => null];
 
-        // Skip if quiet mode or no activity
-        if (!$activity || $quiet || $data['quiet']) {
+        // Add detailed debug logging
+        $this->logger->debug(sprintf(
+            "%s: Processing event type: %s",
+            self::LOG_PREFIX,
+            $event->getName()
+        ));
+
+        $this->logger->debug(sprintf(
+            "%s: Event details - Review: %s, Activity Type: %s, Quiet: %s",
+            self::LOG_PREFIX,
+            $review ? $review->getId() : 'null',
+            $activity ? $activity->get('action') : 'null',
+            $quiet ? 'true' : 'false'
+        ));
+
+        // Detailed debugging of skip conditions
+        $this->logger->debug(sprintf(
+            "%s: Skip conditions - Activity null: %s, Quiet: %s, Data[quiet]: %s",
+            self::LOG_PREFIX,
+            $activity === null ? 'true' : 'false',
+            $quiet ? 'true' : 'false',
+            isset($data['quiet']) ? var_export($data['quiet'], true) : 'null'
+        ));
+
+        // Debug full data array
+        $this->logger->debug(sprintf(
+            "%s: Full data array: %s",
+            self::LOG_PREFIX,
+            var_export($data, true)
+        ));
+
+        // Modified skip condition check
+        if ($activity === null) {
+            $this->logger->debug(sprintf("%s: Skipping - Activity is null", self::LOG_PREFIX));
+            return;
+        }
+
+        if ($quiet === true) {
+            $this->logger->debug(sprintf("%s: Skipping - Quiet is true", self::LOG_PREFIX));
+            return;
+        }
+
+        // The data['quiet'] check might need to be adjusted based on what we see in the logs
+        if (!empty($data['quiet']) && $data['quiet'] !== ['mail']) {
+            $this->logger->debug(sprintf("%s: Skipping - Data quiet is set: %s", self::LOG_PREFIX, var_export($data['quiet'], true)));
             return;
         }
 
         try {
-            $action = $activity->get(IActivity::ACTION);
+            $action = $activity->get('action');
+            $this->logger->debug(sprintf(
+                "%s: Processing activity action: %s",
+                self::LOG_PREFIX,
+                $action
+            ));
 
             switch ($action) {
-                case IActivity::REQUESTED:
-                    // New review requested
+                case 'requested':
+                    $this->logger->debug(sprintf("%s: Handling review request", self::LOG_PREFIX));
                     $this->slackNotify->notifyNewReview($review);
                     break;
 
-                case IActivity::COMMENTED:
-                    // New comment added
+                case 'commented':
+                case 'commented on':
+                case 'commented on the description for':
+                case 'commented on the files for':
+                    $this->logger->debug(sprintf("%s: Handling comment notification", self::LOG_PREFIX));
                     $this->slackNotify->notifyNewComment($review, $activity);
                     break;
 
                 default:
-                    // Ignore other types of activity
+                    $this->logger->debug(sprintf(
+                        "%s: Ignoring unsupported action: %s",
+                        self::LOG_PREFIX,
+                        $action
+                    ));
                     break;
             }
         } catch (Exception $e) {
-            $this->logger->err(
-                sprintf(
-                    "%s: Error processing review activity: %s",
-                    self::LOG_PREFIX,
-                    $e->getMessage()
-                )
-            );
+            $this->logger->err(sprintf(
+                "%s: Error processing review activity: %s",
+                self::LOG_PREFIX,
+                $e->getMessage()
+            ));
         }
     }
 }

@@ -1,6 +1,8 @@
 <?php
 namespace SlackNotify\Service;
 
+use Users\Model\User;
+
 interface IUserMapping
 {
     const SERVICE_NAME = "SlackNotifyUserMapping";
@@ -8,8 +10,8 @@ interface IUserMapping
     /**
      * Get Slack user ID for a Swarm user
      *
-     * @param string $email - Email address to look up
+     * @param User $user - Swarm user to look up
      * @return string|null - Slack user ID or null if not found
      */
-    public function getSlackUserId(string $email): ?string;
+    public function getSlackUserId(User $user): ?string;
 }
