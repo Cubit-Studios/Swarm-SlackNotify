@@ -17,6 +17,14 @@ interface ISlackNotify
     public function notifyNewReview(Review $review);
 
     /**
+     * Send notification about revisions being requested on existing review by direct message to review author
+     *
+     * @param Review $review - The review
+     * @throws ConfigException
+     */
+    public function notifyReviewNeedsRevision(Review $review);
+
+    /**
      * Send notification about a new review being requested on existing review by direct message to reviewers
      *
      * @param Review $review - The review

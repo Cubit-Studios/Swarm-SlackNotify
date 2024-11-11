@@ -126,6 +126,61 @@ class SlackNotify implements ISlackNotify, InvokableService
         }
     }
 
+    public function notifyReviewNeedsRevision(Review $review)
+    {
+        $this->logger->debug(sprintf(
+            "%s: Starting notifyReviewNeedsReview for review #%s",
+            self::LOG_PREFIX,
+            $review->getId()
+        ));
+
+        $p4Admin = $this->services->get(ConnectionFactory::P4_ADMIN);
+        // Create lock to prevent duplicate notifications
+        $lock = new Lock('slacknotify-approved-' . $review->getId(), $p4Admin);
+
+        try {
+            $lock->lock();
+            $author = $review->getAuthorObject();
+            $slackUserId = $this->userMapping->getSlackUserId($author);
+
+            if ($slackUserId) {
+                $message = [
+                    'channel' => $slackUserId,
+                    'text' => "Your review requires revisions",
+                    'blocks' => [
+                        [
+                            'type' => 'header',
+                            'text' => [
+                                'type' => 'plain_text',
+                                'text' => "✏️ Review #{$review->getId()} requires revisions"
+                            ]
+                        ],
+                        [
+                            'type' => 'section',
+                            'text' => [
+                                'type' => 'mrkdwn',
+                                'text' => "<" . $this->getReviewUrl($review) . "|View Review in Swarm>"
+                            ]
+                        ]
+                    ]
+                ];
+                $this->postToSlack($message);
+            } else {
+                $config = $this->services->get(IDef::CONFIG);
+                $channel = ConfigManager::getValue($config, 'slack-notify.notify_channel');
+                $this->notifyUserLookupFailure($channel, $author->getId());
+            }
+        } catch (Exception $e) {
+            $this->logger->err(sprintf(
+                "%s: Failed to send review requires revision notification: %s",
+                self::LOG_PREFIX,
+                $e->getMessage()
+            ));
+        } finally {
+            $lock->unlock();
+        }
+    }
+
     public function notifyReviewNeedsReview(Review $review)
     {
         $this->logger->debug(sprintf(

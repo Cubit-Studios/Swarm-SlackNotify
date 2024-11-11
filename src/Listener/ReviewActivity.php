@@ -115,6 +115,11 @@ class ReviewActivity extends AbstractEventListener
                     $this->slackNotify->notifyReviewNeedsReview($review);
                     break;
 
+                case MailAction::REVIEW_NEEDS_REVISION:
+                    $this->logger->debug(sprintf("%s: Handling review needs revision", self::LOG_PREFIX));
+                    $this->slackNotify->notifyReviewNeedsRevision($review);
+                    break;
+
                 case MailAction::REVIEW_APPROVED:
                     $this->logger->debug(sprintf("%s: Handling review approved", self::LOG_PREFIX));
                     $this->slackNotify->notifyReviewApproved($review);
