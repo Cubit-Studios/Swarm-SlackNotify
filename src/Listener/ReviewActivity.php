@@ -128,13 +128,13 @@ class ReviewActivity extends AbstractEventListener
 
                 case MailAction::COMMENT_REPLY:
                     $this->logger->debug(sprintf("%s: Handling comment reply", self::LOG_PREFIX));
-                    $this->slackNotify->notifyNewReply($review, $activity);
+                    $originalCommentId = $data['current']['context']['comment'] ?? null;
+                    $this->slackNotify->notifyNewReply($review, $activity, $originalCommentId);
                     break;
 
                 case MailAction::REVIEW_TESTS:
                 case MailAction::REVIEW_TESTS_NO_AUTH:
                     $this->logger->debug(sprintf("%s: Handling review test status", self::LOG_PREFIX));
-                    $data = (array) $event->getParam('data');
                     $testStatus = $data['testStatus'] ?? null;
                     $testUrl = $data['testUrl'] ?? null;
                     $this->slackNotify->notifyTestStatus($review, $activity, [

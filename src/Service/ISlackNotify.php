@@ -46,9 +46,10 @@ interface ISlackNotify
      *
      * @param Review $review - The review that was commented on
      * @param Activity $activity - The comment activity
+     * @param string $originalCommentId - The ID of the original comment replied to
      * @throws ConfigException
      */
-    public function notifyNewReply(Review $review, Activity $activity);
+    public function notifyNewReply(Review $review, Activity $activity, string $originalCommentId);
 
     /**
      * Send notification about test status to review author

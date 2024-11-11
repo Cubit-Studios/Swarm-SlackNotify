@@ -421,7 +421,7 @@ class SlackNotify implements ISlackNotify, InvokableService
         }
     }
 
-    public function notifyNewReply(Review $review, Activity $activity)
+    public function notifyNewReply(Review $review, Activity $activity, string $originalCommentId)
     {
         $this->logger->debug(sprintf(
             "%s: Starting notifyNewReply for review #%s",
@@ -429,116 +429,105 @@ class SlackNotify implements ISlackNotify, InvokableService
             $review->getId()
         ));
 
+
         $p4Admin = $this->services->get(ConnectionFactory::P4_ADMIN);
+
         // Create lock to prevent duplicate notifications
         $lock = new Lock('slacknotify-reply-' . $activity->getId(), $p4Admin);
 
         try {
             $lock->lock();
 
-            // Get the comment author ID from the activity
-            $replyAuthorId = $activity->getRawValue(IActivity::USER);
-            $commentText = $activity->get('description') ?? 'No reply text available';
-
-            // Get the original comment's author ID
-            $originalCommentId = $activity->get('comment');
-            if (!$originalCommentId) {
-                $this->logger->debug(sprintf(
-                    "%s: No original comment ID found in activity",
-                    self::LOG_PREFIX
-                ));
-                return;
-            }
-
-            // Get the comment DAO to fetch the original comment
-            $commentDao = $this->services->get(IDao::COMMENT_DAO);
-            $originalComment = $commentDao->fetchById($originalCommentId, $p4Admin);
+            // Fetch the original comment to get its author
+            $commentDAO = $this->services->get(IDao::COMMENT_DAO);
+            $originalComment = $commentDAO->fetchById($originalCommentId, $p4Admin);
             if (!$originalComment) {
                 $this->logger->debug(sprintf(
-                    "%s: Original comment not found for ID: %s",
+                    "%s: Could not find original comment %d",
                     self::LOG_PREFIX,
                     $originalCommentId
                 ));
                 return;
             }
 
-            $originalAuthorId = $originalComment->get('user');
-            if ($originalAuthorId === $replyAuthorId) {
+            $originalAuthor = $originalComment->get('user');
+            $replyAuthor = $activity->get('user');
+
+            // Don't notify about self-replies
+            if ($originalAuthor === $replyAuthor) {
                 $this->logger->debug(sprintf(
-                    "%s: Skipping notification as reply author is the same as original comment author: %s",
-                    self::LOG_PREFIX,
-                    $replyAuthorId
+                    "%s: Skipping notification for self-reply",
+                    self::LOG_PREFIX
                 ));
                 return;
             }
 
-            // Get the user DAO to fetch the original comment author
-            $userDao = $this->services->get(IDao::USER_DAO);
-            if (!$userDao->exists($originalAuthorId, $p4Admin)) {
-                $this->logger->debug(sprintf(
-                    "%s: Original comment author does not exist: %s",
-                    self::LOG_PREFIX,
-                    $originalAuthorId
-                ));
-                return;
-            }
-
-            /** @var User $originalAuthor */
-            $originalAuthor = $userDao->fetchById($originalAuthorId, $p4Admin);
-            $slackUserId = $this->userMapping->getSlackUserId($originalAuthor);
+            // Get Slack user ID for the original comment author
+            $user = $this->services->get(IDao::USER_DAO)->fetchById($originalAuthor, $p4Admin);
+            $slackUserId = $this->userMapping->getSlackUserId($user);
 
             if ($slackUserId) {
-                // Get the reply author's name for the notification
-                $replyAuthor = $userDao->fetchById($replyAuthorId, $p4Admin);
-                $replyAuthorName = $replyAuthor ? $replyAuthor->getFullName() : $replyAuthorId;
-
-                // Build and send the message
                 $message = [
                     'channel' => $slackUserId,
-                    'text' => "New reply to your comment on Review #{$review->getId()}",
+                    'text' => "💬 New reply on Review #{$review->getId()}",
                     'blocks' => [
                         [
                             'type' => 'header',
                             'text' => [
                                 'type' => 'plain_text',
-                                'text' => "💬 New Reply to Your Comment"
+                                'text' => "💬 New Reply on Review #{$review->getId()}"
                             ]
                         ],
                         [
                             'type' => 'section',
                             'text' => [
                                 'type' => 'mrkdwn',
-                                'text' => "*Review:* #{$review->getId()}\n*From:* {$replyAuthorName}\n*Reply:* {$commentText}"
+                                'text' => "*From:* {$replyAuthor}\n*Reply:* {$activity->get('description')}"
                             ]
                         ],
                         [
                             'type' => 'section',
                             'text' => [
                                 'type' => 'mrkdwn',
-                                'text' => "*Original Comment:* " . ($originalComment->get('description') ?? 'No comment text available')
+                                'text' => "*Original Comment:* " . substr($originalComment->get('body'), 0, 100) .
+                                    (strlen($originalComment->get('body')) > 100 ? '...' : '')
                             ]
                         ],
                         [
                             'type' => 'section',
                             'text' => [
                                 'type' => 'mrkdwn',
-                                'text' => "<" . $this->getReviewUrl($review) . "|View Discussion in Swarm>"
+                                'text' => "<" . $this->getReviewUrl($review) . "|View Review in Swarm>"
                             ]
                         ]
                     ]
                 ];
 
+                $this->logger->debug(sprintf(
+                    "%s: Sending reply notification to %s",
+                    self::LOG_PREFIX,
+                    $originalAuthor
+                ));
+
                 $this->postToSlack($message);
             } else {
+                $this->logger->debug(sprintf(
+                    "%s: No Slack user ID found for comment author %s",
+                    self::LOG_PREFIX,
+                    $originalAuthor
+                ));
+                // Also notify in the channel about the lookup failure
                 $config = $this->services->get(IDef::CONFIG);
                 $channel = ConfigManager::getValue($config, 'slack-notify.notify_channel');
-                $this->notifyUserLookupFailure($channel, $originalAuthorId);
+                $this->notifyUserLookupFailure($channel, $originalAuthor);
             }
+
         } catch (Exception $e) {
             $this->logger->err(sprintf(
-                "%s: Failed to send reply notification: %s",
+                "%s: Failed to send reply notification: %s\nStack trace: %s",
                 self::LOG_PREFIX,
-                $e->getMessage()
+                $e->getMessage(),
+                $e->getTraceAsString()
             ));
         } finally {
             $lock->unlock();
