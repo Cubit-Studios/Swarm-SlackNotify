@@ -6,10 +6,11 @@ use Application\Config\ConfigManager;
 use Application\Config\IConfigDefinition as IDef;
 use Events\Listener\AbstractEventListener;
 use Exception;
+use Laminas\EventManager\Event;
 use Laminas\ServiceManager\ServiceLocatorInterface as ServiceLocator;
+use Mail\MailAction;
 use Reviews\Model\Review;
 use SlackNotify\Service\ISlackNotify;
-use Laminas\EventManager\Event;
 
 class ReviewActivity extends AbstractEventListener
 {
@@ -104,17 +105,42 @@ class ReviewActivity extends AbstractEventListener
             ));
 
             switch ($action) {
-                case 'requested':
+                case MailAction::REVIEW_REQUESTED:
                     $this->logger->debug(sprintf("%s: Handling review request", self::LOG_PREFIX));
                     $this->slackNotify->notifyNewReview($review);
                     break;
 
-                case 'commented':
-                case 'commented on':
-                case 'commented on the description for':
-                case 'commented on the files for':
-                    $this->logger->debug(sprintf("%s: Handling comment notification", self::LOG_PREFIX));
+                case MailAction::REVIEW_NEEDS_REVIEW:
+                    $this->logger->debug(sprintf("%s: Handling review needs review", self::LOG_PREFIX));
+                    $this->slackNotify->notifyReviewNeedsReview($review);
+                    break;
+
+                case MailAction::REVIEW_APPROVED:
+                    $this->logger->debug(sprintf("%s: Handling review approved", self::LOG_PREFIX));
+                    $this->slackNotify->notifyReviewApproved($review);
+                    break;
+
+                case MailAction::COMMENT_ADDED:
+                case MailAction::DESCRIPTION_COMMENT_ADDED:
+                    $this->logger->debug(sprintf("%s: Handling comment added", self::LOG_PREFIX));
                     $this->slackNotify->notifyNewComment($review, $activity);
+                    break;
+
+                case MailAction::COMMENT_REPLY:
+                    $this->logger->debug(sprintf("%s: Handling comment reply", self::LOG_PREFIX));
+                    $this->slackNotify->notifyNewReply($review, $activity);
+                    break;
+
+                case MailAction::REVIEW_TESTS:
+                case MailAction::REVIEW_TESTS_NO_AUTH:
+                    $this->logger->debug(sprintf("%s: Handling review test status", self::LOG_PREFIX));
+                    $data = (array) $event->getParam('data');
+                    $testStatus = $data['testStatus'] ?? null;
+                    $testUrl = $data['testUrl'] ?? null;
+                    $this->slackNotify->notifyTestStatus($review, $activity, [
+                        'status' => $testStatus,
+                        'url' => $testUrl
+                    ]);
                     break;
 
                 default:

@@ -126,6 +126,146 @@ class SlackNotify implements ISlackNotify, InvokableService
         }
     }
 
+    public function notifyReviewNeedsReview(Review $review)
+    {
+        $this->logger->debug(sprintf(
+            "%s: Starting notifyReviewNeedsReview for review #%s",
+            self::LOG_PREFIX,
+            $review->getId()
+        ));
+
+        $p4Admin = $this->services->get(ConnectionFactory::P4_ADMIN);
+        // Create lock to prevent duplicate notifications
+        $lock = new Lock('slacknotify-needs-review-' . $review->getId(), $p4Admin);
+
+        try {
+            $lock->lock();
+            $reviewers = $review->getReviewers();
+            $author = $review->getAuthorObject();
+
+            foreach ($reviewers as $reviewerId) {
+                $userDao = $this->services->get(IDao::USER_DAO);
+                if (!$userDao->exists($reviewerId, $p4Admin)) {
+                    $this->logger->debug(sprintf(
+                        "%s: User with id does not exist: %s",
+                        self::LOG_PREFIX,
+                        $reviewerId
+                    ));
+                    continue;
+                }
+
+                /** @var User $reviewer */
+                $reviewer = $userDao->fetchById($reviewerId, $p4Admin);
+                $slackUserId = $this->userMapping->getSlackUserId($reviewer);
+
+                if ($slackUserId) {
+                    $message = [
+                        'channel' => $slackUserId,
+                        'text' => "Review needs your attention",
+                        'blocks' => [
+                            [
+                                'type' => 'header',
+                                'text' => [
+                                    'type' => 'plain_text',
+                                    'text' => "Review #{$review->getId()} Needs Your Review"
+                                ]
+                            ],
+                            [
+                                'type' => 'section',
+                                'text' => [
+                                    'type' => 'mrkdwn',
+                                    'text' => "*Author:* {$author->getFullName()}\n*Description:* {$review->getDescription()}"
+                                ]
+                            ],
+                            [
+                                'type' => 'section',
+                                'text' => [
+                                    'type' => 'mrkdwn',
+                                    'text' => "<" . $this->getReviewUrl($review) . "|View Review in Swarm>"
+                                ]
+                            ]
+                        ]
+                    ];
+                    $this->postToSlack($message);
+                } else {
+                    $config = $this->services->get(IDef::CONFIG);
+                    $channel = ConfigManager::getValue($config, 'slack-notify.notify_channel');
+                    $this->notifyUserLookupFailure($channel, $reviewerId);
+                }
+            }
+        } catch (Exception $e) {
+            $this->logger->err(sprintf(
+                "%s: Failed to send review needs review notification: %s",
+                self::LOG_PREFIX,
+                $e->getMessage()
+            ));
+        } finally {
+            $lock->unlock();
+        }
+    }
+
+    public function notifyReviewApproved(Review $review)
+    {
+        $this->logger->debug(sprintf(
+            "%s: Starting notifyReviewApproved for review #%s",
+            self::LOG_PREFIX,
+            $review->getId()
+        ));
+
+        $p4Admin = $this->services->get(ConnectionFactory::P4_ADMIN);
+        // Create lock to prevent duplicate notifications
+        $lock = new Lock('slacknotify-approved-' . $review->getId(), $p4Admin);
+
+        try {
+            $lock->lock();
+            $author = $review->getAuthorObject();
+            $slackUserId = $this->userMapping->getSlackUserId($author);
+
+            if ($slackUserId) {
+                $message = [
+                    'channel' => $slackUserId,
+                    'text' => "Your review has been approved",
+                    'blocks' => [
+                        [
+                            'type' => 'header',
+                            'text' => [
+                                'type' => 'plain_text',
+                                'text' => "✅ Review #{$review->getId()} Approved"
+                            ]
+                        ],
+                        [
+                            'type' => 'section',
+                            'text' => [
+                                'type' => 'mrkdwn',
+                                'text' => "Your review has been approved! You can now commit your changes."
+                            ]
+                        ],
+                        [
+                            'type' => 'section',
+                            'text' => [
+                                'type' => 'mrkdwn',
+                                'text' => "<" . $this->getReviewUrl($review) . "|View Review in Swarm>"
+                            ]
+                        ]
+                    ]
+                ];
+                $this->postToSlack($message);
+            } else {
+                $config = $this->services->get(IDef::CONFIG);
+                $channel = ConfigManager::getValue($config, 'slack-notify.notify_channel');
+                $this->notifyUserLookupFailure($channel, $author->getId());
+            }
+        } catch (Exception $e) {
+            $this->logger->err(sprintf(
+                "%s: Failed to send review approved notification: %s",
+                self::LOG_PREFIX,
+                $e->getMessage()
+            ));
+        } finally {
+            $lock->unlock();
+        }
+    }
+
     public function notifyNewComment(Review $review, Activity $activity)
     {
         $this->logger->debug(sprintf(
@@ -280,6 +420,243 @@ class SlackNotify implements ISlackNotify, InvokableService
             $lock->unlock();
         }
     }
+
+    public function notifyNewReply(Review $review, Activity $activity)
+    {
+        $this->logger->debug(sprintf(
+            "%s: Starting notifyNewReply for review #%s",
+            self::LOG_PREFIX,
+            $review->getId()
+        ));
+
+        $p4Admin = $this->services->get(ConnectionFactory::P4_ADMIN);
+        // Create lock to prevent duplicate notifications
+        $lock = new Lock('slacknotify-reply-' . $activity->getId(), $p4Admin);
+
+        try {
+            $lock->lock();
+
+            // Get the comment author ID from the activity
+            $replyAuthorId = $activity->getRawValue(IActivity::USER);
+            $commentText = $activity->get('description') ?? 'No reply text available';
+
+            // Get the original comment's author ID
+            $originalCommentId = $activity->get('comment');
+            if (!$originalCommentId) {
+                $this->logger->debug(sprintf(
+                    "%s: No original comment ID found in activity",
+                    self::LOG_PREFIX
+                ));
+                return;
+            }
+
+            // Get the comment DAO to fetch the original comment
+            $commentDao = $this->services->get(IDao::COMMENT_DAO);
+            $originalComment = $commentDao->fetchById($originalCommentId, $p4Admin);
+            if (!$originalComment) {
+                $this->logger->debug(sprintf(
+                    "%s: Original comment not found for ID: %s",
+                    self::LOG_PREFIX,
+                    $originalCommentId
+                ));
+                return;
+            }
+
+            $originalAuthorId = $originalComment->get('user');
+            if ($originalAuthorId === $replyAuthorId) {
+                $this->logger->debug(sprintf(
+                    "%s: Skipping notification as reply author is the same as original comment author: %s",
+                    self::LOG_PREFIX,
+                    $replyAuthorId
+                ));
+                return;
+            }
+
+            // Get the user DAO to fetch the original comment author
+            $userDao = $this->services->get(IDao::USER_DAO);
+            if (!$userDao->exists($originalAuthorId, $p4Admin)) {
+                $this->logger->debug(sprintf(
+                    "%s: Original comment author does not exist: %s",
+                    self::LOG_PREFIX,
+                    $originalAuthorId
+                ));
+                return;
+            }
+
+            /** @var User $originalAuthor */
+            $originalAuthor = $userDao->fetchById($originalAuthorId, $p4Admin);
+            $slackUserId = $this->userMapping->getSlackUserId($originalAuthor);
+
+            if ($slackUserId) {
+                // Get the reply author's name for the notification
+                $replyAuthor = $userDao->fetchById($replyAuthorId, $p4Admin);
+                $replyAuthorName = $replyAuthor ? $replyAuthor->getFullName() : $replyAuthorId;
+
+                // Build and send the message
+                $message = [
+                    'channel' => $slackUserId,
+                    'text' => "New reply to your comment on Review #{$review->getId()}",
+                    'blocks' => [
+                        [
+                            'type' => 'header',
+                            'text' => [
+                                'type' => 'plain_text',
+                                'text' => "💬 New Reply to Your Comment"
+                            ]
+                        ],
+                        [
+                            'type' => 'section',
+                            'text' => [
+                                'type' => 'mrkdwn',
+                                'text' => "*Review:* #{$review->getId()}\n*From:* {$replyAuthorName}\n*Reply:* {$commentText}"
+                            ]
+                        ],
+                        [
+                            'type' => 'section',
+                            'text' => [
+                                'type' => 'mrkdwn',
+                                'text' => "*Original Comment:* " . ($originalComment->get('description') ?? 'No comment text available')
+                            ]
+                        ],
+                        [
+                            'type' => 'section',
+                            'text' => [
+                                'type' => 'mrkdwn',
+                                'text' => "<" . $this->getReviewUrl($review) . "|View Discussion in Swarm>"
+                            ]
+                        ]
+                    ]
+                ];
+
+                $this->postToSlack($message);
+            } else {
+                $config = $this->services->get(IDef::CONFIG);
+                $channel = ConfigManager::getValue($config, 'slack-notify.notify_channel');
+                $this->notifyUserLookupFailure($channel, $originalAuthorId);
+            }
+        } catch (Exception $e) {
+            $this->logger->err(sprintf(
+                "%s: Failed to send reply notification: %s",
+                self::LOG_PREFIX,
+                $e->getMessage()
+            ));
+        } finally {
+            $lock->unlock();
+        }
+    }
+
+    public function notifyTestStatus(Review $review, Activity $activity, array $testData = [])
+    {
+        $this->logger->debug(sprintf(
+            "%s: Starting notifyTestStatus for review #%s with status %s",
+            self::LOG_PREFIX,
+            $review->getId(),
+            $testData['status'] ?? 'unknown'
+        ));
+
+        $p4Admin = $this->services->get(ConnectionFactory::P4_ADMIN);
+        // Create lock to prevent duplicate notifications
+        $lock = new Lock('slacknotify-test-status-' . $review->getId(), $p4Admin);
+
+        try {
+            $lock->lock();
+            $author = $review->getAuthorObject();
+            $slackUserId = $this->userMapping->getSlackUserId($author);
+
+            if ($slackUserId) {
+                // Determine status icon and message based on test status
+                $status = $testData['status'] ?? 'unknown';
+                switch ($status) {
+                    case 'pass':
+                        $icon = '✅';
+                        $statusText = 'Passed';
+                        $contextMessage = "All tests have passed successfully.";
+                        break;
+                    case 'fail':
+                        $icon = '❌';
+                        $statusText = 'Failed';
+                        $contextMessage = "Please check the test results and fix any failing tests.";
+                        break;
+                    case 'running':
+                        $icon = '🔄';
+                        $statusText = 'Running';
+                        $contextMessage = "Tests are currently running.";
+                        break;
+                    default:
+                        $icon = 'ℹ️';
+                        $statusText = 'Unknown';
+                        $contextMessage = "Test status is unknown.";
+                }
+
+                $message = [
+                    'channel' => $slackUserId,
+                    'text' => "Test status update for Review #{$review->getId()}",
+                    'blocks' => [
+                        [
+                            'type' => 'header',
+                            'text' => [
+                                'type' => 'plain_text',
+                                'text' => "$icon Test Status: Review #{$review->getId()}"
+                            ]
+                        ],
+                        [
+                            'type' => 'section',
+                            'text' => [
+                                'type' => 'mrkdwn',
+                                'text' => "*Status:* Tests {$statusText}\n*Review:* {$review->getDescription()}"
+                            ]
+                        ]
+                    ]
+                ];
+
+                // Add test URL if available
+                if (!empty($testData['url'])) {
+                    $message['blocks'][] = [
+                        'type' => 'section',
+                        'text' => [
+                            'type' => 'mrkdwn',
+                            'text' => "<{$testData['url']}|View Test Results>"
+                        ]
+                    ];
+                }
+
+                // Add review URL
+                $message['blocks'][] = [
+                    'type' => 'section',
+                    'text' => [
+                        'type' => 'mrkdwn',
+                        'text' => "<" . $this->getReviewUrl($review) . "|View Review in Swarm>"
+                    ]
+                ];
+
+                // Add context message
+                $message['blocks'][] = [
+                    'type' => 'context',
+                    'elements' => [
+                        [
+                            'type' => 'mrkdwn',
+                            'text' => $contextMessage
+                        ]
+                    ]
+                ];
+
+                $this->postToSlack($message);
+            } else {
+                $config = $this->services->get(IDef::CONFIG);
+                $channel = ConfigManager::getValue($config, 'slack-notify.notify_channel');
+                $this->notifyUserLookupFailure($channel, $author->getId());
+            }
+        } catch (Exception $e) {
+            $this->logger->err(sprintf(
+                "%s: Failed to send test status notification: %s",
+                self::LOG_PREFIX,
+                $e->getMessage()
+            ));
+        } finally {
+            $lock->unlock();
+        }
+    }
+
 
     private function buildCommentMessage(
         string $slackUserId,
