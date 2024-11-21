@@ -62,7 +62,7 @@ The module requires the following configuration in your Swarm settings:
 ```php
 [
     'slack' => [
-        // OAuth token for your Slack app
+        // OAuth token for your Slack app (Found in OAuth & Permissions after installing the Slack, more details: https://api.slack.com/authentication/oauth-v2)
         'token' => 'xoxb-your-token-here',
         
         // Channel for new review notifications
@@ -78,9 +78,11 @@ The module requires the following configuration in your Swarm settings:
 
 Your Slack app needs the following OAuth scopes:
 
-- `chat:write` - For posting messages
-- `users:read.email` - For looking up users by email
-- `im:write` - For sending direct messages
+- chat:write - Send messages as @SwarmNotifier.
+- chat:write.public - Send messages to channels where @SwarmNotifier isn’t a member.
+- im:write - Start direct messages with users.
+- users:read - View user information in the workspace.
+- users:read.email - Look up users by their email address
 
 ## Message Examples
 
